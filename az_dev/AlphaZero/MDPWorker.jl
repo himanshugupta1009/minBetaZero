@@ -7,7 +7,7 @@ struct MDPWorker{AC, A <: MDPAgent, B <: BatchManager, H <: Union{<:Channel, <:R
     history_channel :: H
 end
 
-function MDPWorker(mdp::MDP, actor_critic, history_channel::Channel, params::AlphaZeroParams)
+function MDPWorker(mdp::MDP, actor_critic, history_channel::Channel, params::AlphaZeroParams, ns)
     (; inference_batchsize, n_agents, inference_T) = params
 
     @assert n_agents >= inference_batchsize
@@ -19,7 +19,7 @@ function MDPWorker(mdp::MDP, actor_critic, history_channel::Channel, params::Alp
 
     batch_manager = BatchManager{inference_T}(;
         batchsize = inference_batchsize,
-        in_size = size(rand(MersenneTwister(1), initialstate(mdp))),
+        in_size = Tuple(ns),
         na = length(actions(mdp)),
         n_batches = ceil(Int, n_agents // inference_batchsize)
     )
@@ -58,6 +58,7 @@ function worker_main(worker::MDPWorker, n_steps::Integer; ntasks = Threads.nthre
     end
 
     Threads.foreach(response_ch; ntasks) do (batch, index)
+        Random.seed!(worker.agents[index].rng) # Reseed RNG to prevent correlations between threads
         process_agent(worker, batch, index)
     end
 

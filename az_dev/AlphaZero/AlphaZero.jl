@@ -16,6 +16,8 @@ export NetworkParameters, ActorCritic, getloss, CGF, RMSNorm
 
 export alphazero, AlphaZeroParams
 
+include("../../../alphazero_style_human_aware_navigation/src/ES_POMDP_Planner.jl")
+
 @kwdef struct AlphaZeroParams
     # Data collection args
     max_steps           = 100
@@ -62,24 +64,24 @@ function alphazero(params::AlphaZeroParams, mdp::MDP, actor_critic, info = Dict{
     buffer          = DataBuffer(mdp, params.buff_cap, params.batchsize, params.rng)
     history_channel = Channel{MDPHistory{statetype(mdp), Float32}}(Inf)
     worker          = MDPWorker(mdp, deepcopy(actor_critic), history_channel, params)
-    actor_critic    = gpu(actor_critic)
-    optimiser       = Flux.setup(params.optimiser, actor_critic)
+    #actor_critic    = gpu(actor_critic)
 
     info[:ac] = actor_critic
 
-    az_main(params, actor_critic, info, buffer, history_channel, worker, optimiser)
+    az_main(params, actor_critic, info, buffer, history_channel, worker)
 end
 
-function az_main(params, actor_critic, info, buffer, history_channel, worker, optimiser)
+function az_main(params, actor_critic, info, buffer, history_channel, worker)
     (; n_iter, steps_per_iter, train_intensity, warmup_steps, batchsize) = params
 
     steps_saved = 0
     prog = Progress(n_iter)
 
     for itr in 1:n_iter
+        println("Worker iteration $itr")
         worker_main(worker, steps_per_iter)
         process_histories!(history_channel, buffer, info, itr, params)
-        next!(prog; showvalues = progressmeter_info(info, itr, params))
+        #next!(prog; showvalues = progressmeter_info(info, itr, params))
 
         buffer.length >= warmup_steps || continue
 
@@ -88,7 +90,9 @@ function az_main(params, actor_critic, info, buffer, history_channel, worker, op
         steps_saved -= n_batches * batchsize
 
         if n_batches > 0
-            train!(actor_critic, optimiser, buffer, params, n_batches, info)
+            println("Training for $n_batches batches")
+            train_az!(actor_critic, buffer, params, n_batches, info)
+            println("Updating worker actor-critic")
             update_actor_critic!(worker, actor_critic)
         end
     end
@@ -117,7 +121,10 @@ function process_histories!(
             push!(get!(info, :episode_length, Int[]    ), h.steps             )
         end
 
-        to_buffer!(buffer, h.state, h.value_target, h.policy_target)
+        #state = nn_input_to_state(h.state, info[:input_config], info[:env])
+
+        input_vecs = state_to_nn_input.(h.state, Ref(info[:env]), Ref(info[:input_config]))
+        to_buffer!(buffer, input_vecs, h.value_target, h.policy_target)
     end
 
     GC.gc(false) # clear the allocated states and histories
@@ -161,9 +168,8 @@ function rounded_stats(x; sigdigits=1)
     return rounded_mu, rounded_sigma
 end
 
-function train!(
+function train_az!(
         actor_critic,
-        optimiser,
         buffer      :: DataBuffer,
         params      :: AlphaZeroParams,
         n_batches   :: Int,
@@ -171,6 +177,8 @@ function train!(
         debug       :: Bool = true
     )
 
+    actor_critic    = gpu(actor_critic)
+    optimiser       = Flux.setup(params.optimiser, actor_critic)
     (; plot_training, value_scale) = params
 
     train_info = Dict(
@@ -218,6 +226,7 @@ function train!(
     end
 
     Flux.testmode!(actor_critic)
+    actor_critic    = cpu(actor_critic)
 
     plot_training && plot_train_info(train_info)
 

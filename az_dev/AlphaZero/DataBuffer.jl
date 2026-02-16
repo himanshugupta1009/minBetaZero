@@ -39,10 +39,10 @@ mutable struct DataBuffer{BCPU <: Batch, BGPU <: Batch, RNG <: AbstractRNG}
     index               :: Int
 end
 
-function DataBuffer(mdp::MDP, capacity::Integer, batchsize::Integer, rng::AbstractRNG)
+function DataBuffer(mdp::MDP, capacity::Integer, batchsize::Integer, rng::AbstractRNG, ns=nothing)
     @assert capacity >= batchsize "Capacity not be smaller than batchsize"
     na            = length(actions(mdp))
-    input_dims    = size(rand(MersenneTwister(1), initialstate(mdp)))
+    input_dims    = size(rand(MersenneTwister(1), !isnothing(ns)  ? ns : initialstate(mdp)))
     batch         = cpuBatch(input_dims, na, capacity )
     minibatch_cpu = cpuBatch(input_dims, na, batchsize)
     minibatch_gpu = gpuBatch(input_dims, na, batchsize)
