@@ -78,10 +78,9 @@ function az_main(params, actor_critic, info, buffer, history_channel, worker)
     prog = Progress(n_iter)
 
     for itr in 1:n_iter
-        println("Worker iteration $itr")
         worker_main(worker, steps_per_iter)
         process_histories!(history_channel, buffer, info, itr, params)
-        #next!(prog; showvalues = progressmeter_info(info, itr, params))
+        next!(prog; showvalues = progressmeter_info(info, itr, params))
 
         buffer.length >= warmup_steps || continue
 
@@ -90,9 +89,7 @@ function az_main(params, actor_critic, info, buffer, history_channel, worker)
         steps_saved -= n_batches * batchsize
 
         if n_batches > 0
-            println("Training for $n_batches batches")
             train_az!(actor_critic, buffer, params, n_batches, info)
-            println("Updating worker actor-critic")
             update_actor_critic!(worker, actor_critic)
         end
     end
