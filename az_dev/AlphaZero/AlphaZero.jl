@@ -14,7 +14,7 @@ include("neural_network.jl")
 using .NeuralNet
 export NetworkParameters, ActorCritic, getloss, CGF, RMSNorm
 
-export alphazero, AlphaZeroParams
+export alphazero, AlphaZeroParams, select_action
 
 include("../../../alphazero_style_human_aware_navigation/src/ES_POMDP_Planner.jl")
 
@@ -242,6 +242,59 @@ function plot_train_info(train_info)
         size=(900,600)
     ) |> display
     return nothing
+end
+
+function isdone(planner::GumbelSearch)
+    return planner.tree.Nh[1] >= planner.tree_queries
+end
+
+function select_action(
+    actor_critic,
+    state,
+    mdp,
+    env,
+    input_config,
+    params;
+    n_mcts_steps::Int = params.tree_queries,
+    deterministic::Bool = false,
+    rng::AbstractRNG = Random.default_rng()
+)
+    # 1. Initialize tree search with current state
+    mcts = GumbelSearch(mdp; 
+        tree_queries = n_mcts_steps,
+        m_acts_init = params.m_acts_init,
+        k_o = params.k_o,
+        cscale = params.cscale,
+        cvisit = params.cvisit,
+        rng = rng
+    )
+    insert_root!(mcts, state)
+
+    # 2. Run tree search loop
+    while !isdone(mcts)
+        # Forward pass: expand tree
+        s_query = mcts_forward!(mcts)
+        
+        # Neural network inference
+        nn_input = state_to_nn_input(s_query, env, input_config)
+        value, policy_logits = actor_critic(reshape(nn_input, :, 1); logits=true)
+        
+        # Backward pass: update tree
+        mcts_backward!(mcts, value[1], policy_logits[:, 1])
+    end
+
+    # 3. Select action based on search results
+    if deterministic
+        # Greedy: pick best action
+        a, a_info = root_info(mcts)
+        return a
+    else
+        # Sample from improved policy
+        policy, _ = AZTrees.get_improved_policy(mcts, 1)
+        a_idx = Distributions.sample(rng, 1:length(policy), Weights(policy))
+        a = mcts.ordered_actions[a_idx]
+        return a
+    end
 end
 
 end
