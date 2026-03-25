@@ -5,6 +5,7 @@ using POMDPs, POMDPTools, ParticleFilters
 using Statistics, StatsBase, Distributions, Random
 using ProgressMeter, Plots
 using Distributed
+using Dates
 
 include("AZTrees/AZTrees.jl")
 using .AZTrees
@@ -257,7 +258,8 @@ function select_action(
     params;
     n_mcts_steps::Int = params.tree_queries,
     deterministic::Bool = false,
-    rng::AbstractRNG = Random.default_rng()
+    rng::AbstractRNG = Random.default_rng(),
+    dt = Millisecond(500),
 )
     # 1. Initialize tree search with current state
     mcts = GumbelSearch(mdp; 
@@ -270,10 +272,13 @@ function select_action(
     )
     insert_root!(mcts, state)
 
+    start = now()
+    tree_hist = [state]
     # 2. Run tree search loop
-    while !isdone(mcts)
+    while !isdone(mcts) && now() - start < dt
         # Forward pass: expand tree
         s_query = mcts_forward!(mcts)
+        push!(tree_hist, s_query)
         
         # Neural network inference
         nn_input = state_to_nn_input(s_query, env, input_config)
@@ -287,13 +292,13 @@ function select_action(
     if deterministic
         # Greedy: pick best action
         a, a_info = root_info(mcts)
-        return a
+        return a, tree_hist
     else
         # Sample from improved policy
         policy, _ = AZTrees.get_improved_policy(mcts, 1)
         a_idx = Distributions.sample(rng, 1:length(policy), Weights(policy))
         a = mcts.ordered_actions[a_idx]
-        return a
+        return a, tree_hist
     end
 end
 
