@@ -178,3 +178,29 @@ end
 function n_sa_children(tree::GuidedTree, sa_idx::Integer)
     count(!iszero, @view tree.sa_children[:, sa_idx])
 end
+
+function depth(tree::GuidedTree)
+    return depth_s(tree, 1)
+end
+
+function depth_s(tree::GuidedTree, s_idx::Integer)
+    max_depth = 0
+    for (ai, sa_idx) in s_children(tree, s_idx)
+        depth = depth_sa(tree, sa_idx)
+        if depth > max_depth
+            max_depth = depth
+        end
+    end
+    return max_depth
+end
+
+function depth_sa(tree::GuidedTree, sa_idx::Integer)
+    max_depth = 0
+    for child in sa_children(tree, sa_idx)
+        depth = depth_s(tree, child)
+        if depth > max_depth
+            max_depth = depth
+        end
+    end
+    return max_depth + 1
+end

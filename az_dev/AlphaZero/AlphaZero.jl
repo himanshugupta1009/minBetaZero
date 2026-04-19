@@ -260,6 +260,7 @@ function select_action(
     deterministic::Bool = false,
     rng::AbstractRNG = Random.default_rng(),
     dt = Millisecond(500),
+    debug::Bool = false
 )
     # 1. Initialize tree search with current state
     mcts = GumbelSearch(mdp; 
@@ -288,6 +289,12 @@ function select_action(
         mcts_backward!(mcts, value[1], policy_logits[:, 1])
     end
 
+    # depth = depth(mcts.tree)
+    if debug
+        @info "MCTS completed in $(now() - start) with $(length(tree_hist)) states explored."
+        @info "Root visit count: $(mcts.tree.Nh[1]), Q-value range: [$(mcts.tree.qmin), $(mcts.tree.qmax)]"
+        @info "Tree depth: ", AZTrees.depth(mcts.tree)
+    end
     # 3. Select action based on search results
     if deterministic
         # Greedy: pick best action
