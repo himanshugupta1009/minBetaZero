@@ -6,7 +6,7 @@ using POMDPs
 import POMDPTools
 using Random
 
-export GumbelSearch, GuidedTree, root_info, insert_root!, mcts_forward!, mcts_backward!, get_improved_policy, isdone, select_action, depth
+export GumbelSearch, GuidedTree, root_info, insert_root!, mcts_forward!, mcts_backward!, get_improved_policy, isdone, select_action, depth, action_mask
 
 include("SeqHalf.jl")
 include("tree.jl")

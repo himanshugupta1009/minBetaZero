@@ -113,7 +113,8 @@ function insert_root!(planner::GumbelSearch, s_root)
 
     @assert !isterminal(mdp, s_root) "Root state is terminal! s = $s_root"
 
-    reset!(target_N)
+    # mcts_backward_root! resets this again with the live count once the mask is known.
+    reset!(target_N, planner.m_acts_init)
     reset!(tree)
     insert_state!(tree, s_root)
 
@@ -163,8 +164,20 @@ function mcts_backward!(planner::GumbelSearch, value, logits)
     end
 end
 
+"""
+    action_mask(mdp, s) -> Union{Nothing, AbstractVector{Bool}}
+
+Optional MDP hook for state-dependent legal actions. Return a length-`na` boolean vector
+indexed by `POMDPTools.ordered_actions(mdp)`, or `nothing` (the default) meaning "all legal".
+
+Masked actions get a `-Inf` prior logit, so `softmax` gives them probability exactly zero and
+they are never expanded. This is how a domain whose legal action set varies with the state is
+expressed against AlphaZero's fixed-size policy head.
+"""
+action_mask(mdp, s) = nothing
+
 function mcts_backward_root!(planner::GumbelSearch, value, logits)
-    (; tree, live_actions, rng, m_acts_init) = planner
+    (; tree, live_actions, rng, m_acts_init, mdp) = planner
     (; prior_logits) = tree
 
     update_prior!(tree, 1, logits, value)
@@ -175,10 +188,26 @@ function mcts_backward_root!(planner::GumbelSearch, value, logits)
         prior_logits[i, 1] += -log(-log(u))
     end
 
-    # sample `m_acts_init` actions without replacement and insert them into the tree
+    # Illegal actions get -Inf, which survives the gumbel noise above and softmaxes to exactly 0.
+    mask = action_mask(mdp, tree.state[1])
+    n_init = m_acts_init
+    if !isnothing(mask)
+        # A fully masked root would leave the tree childless, and select_root_action!'s argmin
+        # over an empty live set would throw somewhere far from the cause.
+        @assert any(mask) "action_mask left no legal action at the root state $(tree.state[1])"
+        @inbounds for i in eachindex(mask)
+            mask[i] || (prior_logits[i, 1] = -Inf32)
+        end
+        # argmax below would throw on an empty iterator once every legal action is live.
+        n_init = min(m_acts_init, count(mask))
+        # Size the halving schedule for the actions actually in play, not the full action set.
+        reset!(planner.target_N, n_init)
+    end
+
+    # sample `n_init` actions without replacement and insert them into the tree
     fill!(live_actions, false)
 
-    for _ in 1:m_acts_init
+    for _ in 1:n_init
         ai = argmax(
             ai -> prior_logits[ai, 1],
             Iterators.filter(ai -> !live_actions[ai], 1:length(live_actions))
@@ -196,14 +225,31 @@ function mcts_backward_nonroot!(planner::GumbelSearch, value::Real, logits)
 
     sa_idx, s_idx = pop_stack!(tree)
 
+    #=
+    A true terminal has zero continuation value by definition. The network was never trained on
+    the terminal-sentinel state encoding (e.g. this domain's out-of-bounds (-100,-100,-100)
+    position), so its output there is meaningless extrapolation, not a value estimate. Force it
+    to 0 so reward[s_idx] -- the real, already-known terminal reward captured by insert_state!
+    when this node was created -- is the entire signal for this edge, exactly like every
+    ancestor's edge in the while loop below.
+
+    Without this, the leaf's own transition reward was ALSO being dropped from its first backup
+    (the old code used `value` -- the network's raw output -- directly as Qha[sa_idx], never
+    reading reward[s_idx] at this level, only for ancestors). For an ordinary step that's a small
+    uniform bias; for a terminal step it discarded the only ground-truth signal MCTS had for
+    "did this action lead to a crash or the goal" and replaced it with unconstrained network
+    output on an out-of-distribution input.
+    =#
+    isterminal(mdp, tree.state[s_idx]) && (value = zero(value))
+
     update_prior!(tree, s_idx, logits, value)
+
+    gamma = eltype(Qha)(discount(mdp))
+    value = reward[s_idx] + gamma * value
 
     Nha[sa_idx] += 1
     Qha[sa_idx] += (value - Qha[sa_idx]) / Nha[sa_idx]
     update_dq!(tree, Qha[sa_idx])
-
-    value = eltype(Qha)(value)
-    gamma = eltype(Qha)(discount(mdp))
 
     while !stack_empty(tree)
         sa_idx, s_idx = pop_stack!(tree)
@@ -273,7 +319,7 @@ function reduce_root_actions!(planner::GumbelSearch)
 end
 
 function select_nonroot_action!(planner::GumbelSearch, s_idx::Integer)
-    (; tree, ordered_actions) = planner
+    (; tree, ordered_actions, mdp) = planner
     (; Nh, Nha) = tree
 
     pi_completed, _ = get_improved_policy(planner, s_idx)
@@ -281,6 +327,16 @@ function select_nonroot_action!(planner::GumbelSearch, s_idx::Integer)
     max_target = pi_completed
     for (ai, sa_idx) in s_children(tree, s_idx)
         max_target[ai] -= Nha[sa_idx] / (1 + Nh[s_idx])
+    end
+
+    # Must come AFTER the subtraction above: get_improved_policy returns a softmax, so masked
+    # entries arrive as exactly 0.0, and once every legal action has been visited the
+    # Nha/(1+Nh) term drives the legal entries negative and a masked zero would win the argmax.
+    mask = action_mask(mdp, tree.state[s_idx])
+    if !isnothing(mask)
+        @inbounds for i in eachindex(mask)
+            mask[i] || (max_target[i] = -Inf32)
+        end
     end
 
     ai     = argmax(max_target)
@@ -297,17 +353,34 @@ function get_improved_policy(planner::GumbelSearch, s_idx::Integer)
 
     policy = softmax!(temp, @view prior_logits[:, s_idx])
 
-    sum_pi   = zero(eltype(policy))
-    sum_pi_q = zero(promote_type(eltype(Qha), eltype(policy)))
+    sum_pi     = zero(eltype(policy))
+    sum_pi_q   = zero(promote_type(eltype(Qha), eltype(policy)))
+    n_children = 0
     for (ai, sa_idx) in s_children(tree, s_idx)
-        sum_pi   += policy[ai]
-        sum_pi_q += policy[ai] * Qha[sa_idx]
+        sum_pi     += policy[ai]
+        sum_pi_q   += policy[ai] * Qha[sa_idx]
+        n_children += 1
     end
-    visited_value = sum_pi_q / sum_pi
 
-    w1    =         1 // (1 + Nh[s_idx])
-    w2    = Nh[s_idx] // (1 + Nh[s_idx])
-    v_mix = w1 * prior_value[s_idx] + w2 * visited_value
+    Nh_s  = Nh[s_idx]
+    v_mix = if iszero(n_children)
+        #=
+        No child has been expanded yet, so v_mix is just the network's own estimate -- this
+        is the Nh == 0 limit of the mixed formula below.
+
+        Do NOT fold this back into the general expression. `sum_pi_q / sum_pi` is 0/0 = NaN
+        here, and the Nh == 0 weight does NOT annihilate it: `0//1 * NaN == NaN` in Julia.
+        Every improved logit then became NaN, and select_nonroot_action!'s `argmax` silently
+        returned action index 1 for every freshly created node -- so each subtree degenerated
+        into a chain of "action 1 forever", flattening all root Q values.
+        =#
+        float(prior_value[s_idx])
+    else
+        visited_value = sum_pi_q / sum_pi
+        w1 = one(visited_value) / (1 + Nh_s)   # plain float division; `//` allocated a
+        w2 = Nh_s / (1 + Nh_s)                 # Rational on every interior-node visit
+        w1 * prior_value[s_idx] + w2 * visited_value
+    end
 
     sigma = get_sigma(planner, s_idx)
 
@@ -320,6 +393,8 @@ function get_improved_policy(planner::GumbelSearch, s_idx::Integer)
         improved_logits[ai] += transformed_advantage
     end
 
+    # -Inf is expected for action_mask'd entries (they softmax to exactly 0); NaN never is.
+    @assert !any(isnan, improved_logits) "NaN improved logits at s_idx=$s_idx (n_children=$n_children, v_mix=$v_mix, sigma=$sigma)"
     improved_policy = softmax!(improved_logits)
 
     return improved_policy, v_mix

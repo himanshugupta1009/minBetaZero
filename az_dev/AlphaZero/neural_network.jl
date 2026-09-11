@@ -20,6 +20,20 @@ global const DEBUG :: Base.RefValue{Bool} = Ref{Bool}(false)
     critic_categories::Vector = []
     actor_loss::Function = Flux.Losses.logitcrossentropy
     critic_loss::Function = Flux.Losses.mse
+    actor_net::Any = nothing                         # if set, used verbatim instead of a generated mlp
+    critic_net::Any = nothing                        # if set, used verbatim instead of a generated mlp
+end
+
+"""
+    check_net_output(net, in_size, out_size, name)
+
+Validate a user-supplied `NetworkParameters.actor_net`/`critic_net` against the
+input width the head will be fed and the output width the loss expects.
+"""
+function check_net_output(net, in_size::Int, out_size::Int, name::AbstractString)
+    out = first(Flux.outputsize(net, (in_size,); padbatch=true))
+    @assert out == out_size "NetworkParameters.$name maps $in_size inputs to $out outputs, but $out_size outputs were expected."
+    return nothing
 end
 
 """
@@ -74,17 +88,22 @@ end
 Flux.@layer :expand DiscreteActor
 
 function DiscreteActor(nn_params::NetworkParameters)
-    actor_net = mlp(;
-        dims = [
-            nn_params.shared_out_size[1],
-            fill(nn_params.neurons, nn_params.hidden_layers)...,
-            nn_params.action_size
-        ],
-        act_fun = nn_params.activation,
-        head_init = Flux.orthogonal(; gain=sqrt(0.01)),
-        head = true,
-        p_dropout = nn_params.p_dropout
-    )
+    actor_net = if isnothing(nn_params.actor_net)
+        mlp(;
+            dims = [
+                nn_params.shared_out_size[1],
+                fill(nn_params.neurons, nn_params.hidden_layers)...,
+                nn_params.action_size
+            ],
+            act_fun = nn_params.activation,
+            head_init = Flux.orthogonal(; gain=sqrt(0.01)),
+            head = true,
+            p_dropout = nn_params.p_dropout
+        )
+    else
+        check_net_output(nn_params.actor_net, nn_params.shared_out_size[1], nn_params.action_size, "actor_net")
+        nn_params.actor_net
+    end
     DiscreteActor(actor_net, nn_params.actor_loss)
 end
 
@@ -129,17 +148,22 @@ function Critic(nn_params::NetworkParameters)
     else
         @assert false "Critic loss $(nn_params.critic_loss) is not supported. Must use mse, mae, or logitcrossentropy."
     end
-    critic_net = mlp(;
-        dims = [
-            nn_params.shared_out_size[1],
-            fill(nn_params.neurons, nn_params.hidden_layers)...,
-            critic_head_size
-        ],
-        act_fun = nn_params.activation,
-        head_init = Flux.orthogonal(; gain=sqrt(critic_head_gain)),
-        head = true,
-        p_dropout = nn_params.p_dropout
-    )
+    critic_net = if isnothing(nn_params.critic_net)
+        mlp(;
+            dims = [
+                nn_params.shared_out_size[1],
+                fill(nn_params.neurons, nn_params.hidden_layers)...,
+                critic_head_size
+            ],
+            act_fun = nn_params.activation,
+            head_init = Flux.orthogonal(; gain=sqrt(critic_head_gain)),
+            head = true,
+            p_dropout = nn_params.p_dropout
+        )
+    else
+        check_net_output(nn_params.critic_net, nn_params.shared_out_size[1], critic_head_size, "critic_net")
+        nn_params.critic_net
+    end
     Critic(
         critic_net,
         nn_params.critic_loss,

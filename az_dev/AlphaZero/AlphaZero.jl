@@ -17,6 +17,15 @@ export NetworkParameters, ActorCritic, getloss, CGF, RMSNorm
 
 export alphazero, AlphaZeroParams, select_action
 
+#=
+This pulls the navigation domain into `module AlphaZero`, while az_params.jl includes the same
+file into `Main`. So AlphaZero.StateExtendedSpacePOMDP !== Main.StateExtendedSpacePOMDP, and
+AlphaZero.state_to_nn_input is a different function object from Main.state_to_nn_input.
+
+It works only because every function on that path is untyped and duck-types. Adding a type
+annotation to state_to_nn_input, get_human_goals or nn_input_to_state will produce a MethodError
+that looks impossible -- collapse the duplicate include first.
+=#
 include("../../../alphazero_style_human_aware_navigation/src/ES_POMDP_Planner.jl")
 
 @kwdef struct AlphaZeroParams
@@ -36,6 +45,10 @@ include("../../../alphazero_style_human_aware_navigation/src/ES_POMDP_Planner.jl
     cscale              = 0.1
     cvisit              = 50
     m_acts_init         = 2
+    # Wall-clock cap on a single select_action search. `nothing` runs to tree_queries.
+    # Note this only bounds select_action; the MDPWorker/MDPAgent collection path is
+    # bounded by tree_queries alone.
+    mcts_time_limit     = Millisecond(500)
 
     # Training args
     batchsize           = 128
@@ -257,9 +270,9 @@ function select_action(
     input_config,
     params;
     n_mcts_steps::Int = params.tree_queries,
-    deterministic::Bool = false,
+    deterministic::Bool = true,
     rng::AbstractRNG = Random.default_rng(),
-    dt = Millisecond(500),
+    dt = params.mcts_time_limit,
     debug::Bool = false
 )
     # 1. Initialize tree search with current state
@@ -276,7 +289,7 @@ function select_action(
     start = now()
     tree_hist = [state]
     # 2. Run tree search loop
-    while !isdone(mcts) && now() - start < dt
+    while !isdone(mcts) && (isnothing(dt) || now() - start < dt)
         # Forward pass: expand tree
         s_query = mcts_forward!(mcts)
         push!(tree_hist, s_query)

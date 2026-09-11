@@ -57,7 +57,9 @@ function worker_main(worker::MDPWorker, n_steps::Integer; ntasks = Threads.nthre
         actor_critic_worker(worker, ch, n_steps)
     end
 
+    dev = CUDA.device()
     Threads.foreach(response_ch; ntasks) do (batch, index)
+        CUDA.device!(dev)
         Random.seed!(worker.agents[index].rng) # Reseed RNG to prevent correlations between threads
         process_agent(worker, batch, index)
     end
