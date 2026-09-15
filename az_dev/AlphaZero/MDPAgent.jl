@@ -60,9 +60,9 @@ struct MDPAgent{M <: MDP, MCTS <: GumbelSearch, RNG <: AbstractRNG, H <: MDPHist
 end
 
 function MDPAgent(mdp::MDP, params::AlphaZeroParams)
-    (; rng, max_steps, segment_length, tree_queries, k_o, cscale, cvisit, m_acts_init) = params
+    (; rng, max_steps, segment_length, tree_queries, k_o, cscale, cvisit, m_acts_init, max_actions_per_node) = params
 
-    mctsargs = (; tree_queries, k_o, cscale, cvisit, m_acts_init, rng)
+    mctsargs = (; tree_queries, k_o, cscale, cvisit, m_acts_init, max_actions_per_node, rng)
 
     mcts    = GumbelSearch(mdp; mctsargs...)
     history = MDPHistory(mdp)

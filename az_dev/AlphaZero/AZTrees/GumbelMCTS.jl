@@ -10,6 +10,16 @@ struct GumbelSearch{Tree, A, M, RNG}
     alpha_o         :: Float64
     cscale          :: Float64
     cvisit          :: Float64
+    #=
+    Caps how many DISTINCT actions get expanded at any single non-root node (select_nonroot_action!
+    below). m_acts_init/SeqHalf already narrow the ROOT's breadth over time, but interior nodes
+    have no analogous limit: select_nonroot_action!'s argmax runs over every legal action with no
+    visit-count penalty for ones never tried from that node, so a high-prior action can win and
+    branch out a new child at any node, at any depth, for as long as budget remains. Defaults to
+    typemax(Int) (no cap, i.e. current behavior) so existing callers are unaffected; a concrete Int
+    keeps this field type-stable in a function called on every MCTS iteration, unlike Union{Nothing,Int}.
+    =#
+    max_actions_per_node :: Int
     rng             :: RNG
     policy_scratch  :: Vector{Float32}
 
@@ -20,6 +30,7 @@ struct GumbelSearch{Tree, A, M, RNG}
             alpha_o       :: Real = 0,
             cscale        :: Real = 0.1,
             cvisit        :: Real = 50,
+            max_actions_per_node :: Integer = typemax(Int),
             rng           :: RNG  = Random.default_rng()
         ) where {S, A, M <: MDP{S, A}, RNG <: AbstractRNG}
 
@@ -35,6 +46,7 @@ struct GumbelSearch{Tree, A, M, RNG}
         alpha_o = Float64(alpha_o)
         cscale  = Float64(cscale)
         cvisit  = Float64(cvisit)
+        max_actions_per_node = Int(max_actions_per_node)
 
         tree = GuidedTree{S, Int32, Float32}(tree_queries + 1, na, ceil(Int, k_o))
 
@@ -52,6 +64,7 @@ struct GumbelSearch{Tree, A, M, RNG}
             alpha_o,
             cscale,
             cvisit,
+            max_actions_per_node,
             rng,
             policy_scratch
         )
@@ -319,14 +332,16 @@ function reduce_root_actions!(planner::GumbelSearch)
 end
 
 function select_nonroot_action!(planner::GumbelSearch, s_idx::Integer)
-    (; tree, ordered_actions, mdp) = planner
+    (; tree, ordered_actions, mdp, max_actions_per_node) = planner
     (; Nh, Nha) = tree
 
     pi_completed, _ = get_improved_policy(planner, s_idx)
 
     max_target = pi_completed
+    n_children = 0
     for (ai, sa_idx) in s_children(tree, s_idx)
         max_target[ai] -= Nha[sa_idx] / (1 + Nh[s_idx])
+        n_children += 1
     end
 
     # Must come AFTER the subtraction above: get_improved_policy returns a softmax, so masked
@@ -336,6 +351,20 @@ function select_nonroot_action!(planner::GumbelSearch, s_idx::Integer)
     if !isnothing(mask)
         @inbounds for i in eachindex(mask)
             mask[i] || (max_target[i] = -Inf32)
+        end
+    end
+
+    #=
+    Once this node already has max_actions_per_node distinct children, forbid branching out to a
+    NEW one -- an action with no existing sa_idx here has no Nha/(1+Nh) penalty above, so with no
+    cap a high-prior action can win the argmax and create a new child at any node, at any depth,
+    diluting depth in favor of breadth. Restricting the argmax to already-expanded children once
+    the cap is hit sends the rest of this node's budget deeper into the actions already chosen,
+    instead of wider across new ones. No-op when max_actions_per_node is typemax(Int) (default).
+    =#
+    if n_children >= max_actions_per_node
+        @inbounds for ai in eachindex(max_target)
+            iszero(tree.s_children[ai, s_idx]) && (max_target[ai] = -Inf32)
         end
     end
 

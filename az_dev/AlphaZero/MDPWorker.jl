@@ -71,14 +71,22 @@ function worker_main(worker::MDPWorker, n_steps::Integer; ntasks = Threads.nthre
     return nothing
 end
 
-function actor_critic_worker(worker::MDPWorker, response_ch::Channel, target_steps::Integer)
-    (; batch_manager, actor_critic, step_counter, steps_since_gc, agents) = worker
+#=
+Was `n_agents`. That ties GC frequency to an unrelated tuning parameter: cutting n_agents (e.g.
+64 -> 16, to let self-play agents run longer episodes before the worker resets -- see
+az_params.jl) had the side effect of making GC.gc(false) fire 4x more often, since it triggers
+once per this-many completed agent-decisions regardless of how many agents are live. A fixed
+interval decouples the two; 64 matches the old implicit behavior from when n_agents defaulted to
+64, a known-reasonable cadence.
+=#
+const GC_INTERVAL = 64
 
-    n_agents = length(agents)
+function actor_critic_worker(worker::MDPWorker, response_ch::Channel, target_steps::Integer)
+    (; batch_manager, actor_critic, step_counter, steps_since_gc) = worker
 
     while step_counter[] < target_steps
-        if steps_since_gc[] >= n_agents
-            Threads.atomic_sub!(steps_since_gc, n_agents) # Think setting to 0 is wrong
+        if steps_since_gc[] >= GC_INTERVAL
+            Threads.atomic_sub!(steps_since_gc, GC_INTERVAL) # Think setting to 0 is wrong
             GC.gc(false)
         end
 
